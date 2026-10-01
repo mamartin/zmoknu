@@ -126,6 +126,62 @@ function persistOfflineStore(store: OfflineStore, favKeys: Set<string>): void {
 
 // Ulož předpověď pro dané místo do offline úložiště. `favorites` slouží k tomu,
 // aby se při ořezu zachovaly předpovědi oblíbených míst.
+type RawSection = Record<string, (number | string | null)[] | undefined>;
+
+// Doplní do `target` hodnoty ze `src` všude, kde target nemá data (null).
+// Párujeme podle času, ne indexu. Vrací časy, kde chyběl `watchKey`.
+function fillSection(
+  target: RawSection | undefined,
+  src: RawSection | undefined,
+  watchKey: string,
+): Set<string> {
+  const filled = new Set<string>();
+  if (!target || !src) return filled;
+  const tTimes = (target.time ?? []) as string[];
+  const sIndex = new Map(((src.time ?? []) as string[]).map((t, i) => [t, i]));
+  for (const [key, sArr] of Object.entries(src)) {
+    if (key === "time" || !sArr) continue;
+    const tArr = target[key] ?? [];
+    target[key] = tTimes.map((t, i) => {
+      const v = tArr[i];
+      if (v != null) return v;
+      const j = sIndex.get(t);
+      const sv = j == null ? null : sArr[j];
+      if (sv != null && key === watchKey) filled.add(t);
+      return sv ?? null;
+    });
+  }
+  return filled;
+}
+
+// Doplní chybějící data zvoleného modelu z jiného (typicky best_match), aby
+// krátkodobý regionální model nekončil po 2–3 dnech prázdnou předpovědí.
+function fillRawForecast(
+  data: RawForecast,
+  fill: RawForecast,
+): { hourly: Set<string>; daily: Set<string> } {
+  const hourly = fillSection(
+    data.hourly as RawSection,
+    fill.hourly as RawSection,
+    "precipitation",
+  );
+  const daily = fillSection(
+    data.daily as RawSection,
+    fill.daily as RawSection,
+    "precipitation_sum",
+  );
+  fillSection(
+    data.minutely_15 as RawSection | undefined,
+    fill.minutely_15 as RawSection | undefined,
+    "",
+  );
+  const cur = data.current as Record<string, number | string | null>;
+  for (const [k, v] of Object.entries(fill.current ?? {})) {
+    if (cur && cur[k] == null && v != null) cur[k] = v;
+  }
+  return { hourly, daily };
+}
+
 export function saveOfflineForecast(
   location: GeoLocation,
   pastDays: number,
@@ -172,9 +228,24 @@ export async function fetchForecast(
   lon: number,
   pastDays = 1,
   model = "best_match",
-  opts?: { force?: boolean },
+  opts?: {
+    force?: boolean;
+    // Čím doplnit hodiny/dny, pro které zvolený model data nemá (krátký
+    // horizont regionálních modelů). Bez něj zůstávají prázdné jako dřív.
+    fillFrom?: string;
+  },
 ): Promise<Forecast> {
-  const cacheKey = fcKey(lat, lon, pastDays, model);
+  const useModel = model && model !== "best_match";
+  const fillFrom =
+    useModel && opts?.fillFrom && opts.fillFrom !== model
+      ? opts.fillFrom
+      : undefined;
+  const cacheKey = fcKey(
+    lat,
+    lon,
+    pastDays,
+    fillFrom ? `${model}+${fillFrom}` : model,
+  );
   if (!opts?.force) {
     const c = forecastCache.get(cacheKey);
     if (c && Date.now() - c.at < FORECAST_TTL) return c.data;
@@ -237,15 +308,29 @@ export async function fetchForecast(
     wind_speed_unit: "ms",
   });
 
+  // Doplňkový model dostane stejné parametry (stejná časová osa).
+  const fillParams = new URLSearchParams(params);
+  if (fillFrom && fillFrom !== "best_match") fillParams.set("models", fillFrom);
+
   // Zvolený konkrétní model se pošle jako models=… (jeden model → proměnné
   // zůstávají bez přípony, takže mapování níže funguje beze změny).
-  const useModel = model && model !== "best_match";
   if (useModel) params.set("models", model);
 
-  const data = await fetchOmJson<RawForecast>(
-    `${FORECAST_URL}?${params.toString()}`,
-    "Nepodařilo se načíst předpověď.",
-  );
+  const [data, fill] = await Promise.all([
+    fetchOmJson<RawForecast>(
+      `${FORECAST_URL}?${params.toString()}`,
+      "Nepodařilo se načíst předpověď.",
+    ),
+    fillFrom
+      ? fetchOmJson<RawForecast>(
+          `${FORECAST_URL}?${fillParams.toString()}`,
+          "fill",
+        ).catch(() => null)
+      : Promise.resolve(null),
+  ]);
+  // Co zvolený model nemá, doplníme z fillFrom (časy, kde se doplňovaly
+  // srážky, si pamatujeme kvůli přepisu úhrnů níže).
+  const filled = fill ? fillRawForecast(data, fill) : null;
 
   const c = data.current;
   const hourly = mapHourly(data.hourly);
@@ -254,7 +339,7 @@ export async function fetchForecast(
   // pokrývá jen ČR a má krátké rolling okno, občas i výpadek → samé null).
   // POZOR: Number(null) === 0 (je „finite"), takže nelze kontrolovat mapovaná
   // data – null hodnoty by prošly jako nuly. Kontrolujeme proto surové pole.
-  if (useModel) {
+  if (useModel && !filled) {
     const rawTemps = (data.hourly?.temperature_2m ?? []) as (
       | number
       | string
@@ -284,6 +369,26 @@ export async function fetchForecast(
       await applyHourlyPrecip(lat, lon, pastDays, hourly, daily);
     } catch {
       // Když přepis selže, ponecháme úhrny z best_match.
+    }
+  } else if (
+    fillFrom === "best_match" &&
+    filled &&
+    (filled.hourly.size || filled.daily.size)
+  ) {
+    // Doplněné dny pocházejí z best_match → stejný přepis úhrnů jako u
+    // Automaticky, ale jen pro doplněné časy (vlastní srážky modelu necháme).
+    try {
+      const h2 = hourly.map((p) => ({ ...p }));
+      const d2 = daily.map((d) => ({ ...d }));
+      await applyHourlyPrecip(lat, lon, pastDays, h2, d2);
+      hourly.forEach((p, i) => {
+        if (filled.hourly.has(p.time)) p.precipitation = h2[i].precipitation;
+      });
+      daily.forEach((d, i) => {
+        if (filled.daily.has(d.time)) d.precipitationSum = d2[i].precipitationSum;
+      });
+    } catch {
+      // Ponecháme úhrny z best_match.
     }
   }
 

@@ -35,8 +35,31 @@ export const WEATHER_MODELS: WeatherModel[] = [
 
 export const DEFAULT_MODEL = "best_match";
 
+// Volba „Ověřený pro místo" není model Open-Meteo: před stažením předpovědi se
+// přeloží na konkrétní model podle nočního srovnání s měřením stanic
+// (viz lib/verifiedModel.ts). Proto není ve WEATHER_MODELS (ty se posílají
+// přímo do API), jen v nabídce nastavení.
+export const VERIFIED_MODEL = "verified_best";
+// Adresa služby, která pořadí modelů počítá. Bez ní volbu nenabízíme.
+export const MODEL_API_URL: string = (import.meta.env.VITE_MODEL_API_URL ?? "").replace(/\/+$/, "");
+export const VERIFIED_AVAILABLE = MODEL_API_URL !== "";
+export const VERIFIED_CHOICE: WeatherModel = {
+  id: VERIFIED_MODEL,
+  label: "Ověřený pro místo (podle měření)",
+  short: "Ověřený",
+  color: "#5bb6ff",
+  flag: "🎯",
+};
+
+// Pořadí v nabídce: Automaticky, Ověřený, pak jednotlivé modely.
+export const MODEL_CHOICES: WeatherModel[] = [
+  WEATHER_MODELS[0],
+  ...(VERIFIED_AVAILABLE ? [VERIFIED_CHOICE] : []),
+  ...WEATHER_MODELS.slice(1),
+];
+
 export function modelById(id: string): WeatherModel | undefined {
-  return WEATHER_MODELS.find((m) => m.id === id);
+  return MODEL_CHOICES.find((m) => m.id === id);
 }
 
 export function modelLabel(id: string): string {

@@ -51,6 +51,17 @@ npm i -g vercel
 vercel
 ```
 
+## Ověřený model pro místo
+
+Volba **„Ověřený pro místo (podle měření)"** v nastavení vybere pro hledané místo
+model, který se v okolí za posledních 30 dní nejvíc trefoval v předpovědi
+na 1–2 dny. Dny za horizontem vybraného modelu doplní Automaticky.
+
+Pořadí modelů počítá samostatná služba *Přesnost předpovědí* (noční srovnání
+předpovědí s měřením stanic). Aplikace volá její `/api/best?lat=…&lon=…`;
+adresu služby nastavte v `VITE_MODEL_API_URL`. Bez ní se volba v nastavení
+nezobrazí.
+
 ## Licence
 
 Copyright (C) 2026 Jan Václavík

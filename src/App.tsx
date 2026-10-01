@@ -34,7 +34,14 @@ import WhatToWear from "./components/WhatToWear";
 import { fetchAirQuality, type AirByDate } from "./lib/airQuality";
 import { dayHeader, isoDate, locDate, todayISO } from "./lib/format";
 import { tr, useLang } from "./lib/i18n";
-import { DEFAULT_MODEL, WEATHER_MODELS, modelLabel } from "./lib/models";
+import {
+  DEFAULT_MODEL,
+  MODEL_CHOICES,
+  VERIFIED_AVAILABLE,
+  VERIFIED_MODEL,
+  modelLabel,
+} from "./lib/models";
+import { resolveVerifiedModel, type VerifiedPick } from "./lib/verifiedModel";
 import {
   fetchForecast,
   getOfflineForecast,
@@ -214,10 +221,42 @@ export default function App() {
   const [air, setAir] = useState<AirByDate>({});
   // Kolik dní historie načítáme (1–7) a den, na který skočit po donačtení.
   const [pastDays, setPastDays] = useState(1);
-  const [model, setModel] = useStoredState<string>(
+  // Volba uživatele (může být i „Ověřený pro místo"); `model` níže je už
+  // konkrétní model Open-Meteo, se kterým se předpověď stahuje.
+  const [storedChoice, setModel] = useStoredState<string>(
     "zmoknu.model",
     DEFAULT_MODEL
   );
+  // Bez nastavené služby (VITE_MODEL_API_URL) se uložený „Ověřený" chová jako Auto.
+  const modelChoice =
+    storedChoice === VERIFIED_MODEL && !VERIFIED_AVAILABLE
+      ? DEFAULT_MODEL
+      : storedChoice;
+  const isVerified = modelChoice === VERIFIED_MODEL;
+  const verifiedKey = `${location.latitude},${location.longitude}`;
+  const [verified, setVerified] = useState<{
+    key: string;
+    pick: VerifiedPick | null;
+  } | null>(null);
+  useEffect(() => {
+    if (!isVerified) return;
+    let cancelled = false;
+    const [lat, lon] = verifiedKey.split(",").map(Number);
+    resolveVerifiedModel(lat, lon)
+      .catch(() => null)
+      .then((pick) => {
+        if (!cancelled) setVerified({ key: verifiedKey, pick });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isVerified, verifiedKey]);
+  // U „Ověřeného" počkáme na výběr modelu, ať se zbytečně nestáhne Automaticky.
+  const verifiedReady = !isVerified || verified?.key === verifiedKey;
+  const verifiedPick = isVerified && verifiedReady ? verified?.pick ?? null : null;
+  const model = isVerified ? verifiedPick?.model ?? DEFAULT_MODEL : modelChoice;
+  // Regionální modely mají krátký horizont – zbytek dní doplní Automaticky.
+  const fillFrom = isVerified ? DEFAULT_MODEL : undefined;
   const [pendingDate, setPendingDate] = useState<string | null>(null);
   // Vizuální stav swipe gesta (šipka vylézající z kraje jako „zpět" v Chrome).
   const [swipe, setSwipe] = useState<{
@@ -360,7 +399,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!gpsReady) return;
+    if (!gpsReady || !verifiedReady) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -377,6 +416,7 @@ export default function App() {
     lastReloadTick.current = reloadTick;
     fetchForecast(location.latitude, location.longitude, pastDays, model, {
       force,
+      fillFrom,
     })
       .then((f) => {
         if (!cancelled) {
@@ -423,7 +463,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [location, pastDays, model, reloadTick, gpsReady]);
+  }, [location, pastDays, model, fillFrom, reloadTick, gpsReady, verifiedReady]);
 
   // Po dokončení načítání ukonči stav obnovování (pull-to-refresh).
   useEffect(() => {
@@ -590,13 +630,23 @@ export default function App() {
       .filter((f) => !sameLocation(f, location))
       .slice(0, 8)
       .forEach((f) => {
-        fetchForecast(f.latitude, f.longitude, pastDays, model)
-          .then((fc) =>
-            saveOfflineForecast(f, pastDays, model, fc, favoritesRef.current),
+        // U „Ověřeného" má každé oblíbené místo svůj vlastní model.
+        const pickModel = isVerified
+          ? resolveVerifiedModel(f.latitude, f.longitude)
+              .catch(() => null)
+              .then((p) => p?.model ?? DEFAULT_MODEL)
+          : Promise.resolve(modelChoice);
+        pickModel
+          .then((m) =>
+            fetchForecast(f.latitude, f.longitude, pastDays, m, {
+              fillFrom,
+            }).then((fc) =>
+              saveOfflineForecast(f, pastDays, m, fc, favoritesRef.current),
+            ),
           )
           .catch(() => {});
       });
-  }, [favorites, location, model, pastDays]);
+  }, [favorites, location, modelChoice, isVerified, fillFrom, pastDays]);
 
   // Až je appka načtená a chvíli klid, potichu přednačti radarový chunk
   // (maplibre). Otevření radaru je pak okamžité, ale nezdrží první vykreslení.
@@ -1636,7 +1686,7 @@ export default function App() {
                     { model: modelLabel(model) },
                   )}
                 </span>
-                {model !== DEFAULT_MODEL && (
+                {modelChoice !== DEFAULT_MODEL && (
                   <button
                     type="button"
                     className="nodata-switch"
@@ -1822,16 +1872,42 @@ export default function App() {
             </span>
             <select
               className="settings-model-select"
-              value={model}
+              value={modelChoice}
               onChange={(e) => { posthog.capture("weather_model_changed", { model: e.target.value }); setModel(e.target.value); }}
             >
-              {WEATHER_MODELS.map((m) => (
+              {MODEL_CHOICES.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.flag} {tr(m.label)}
                 </option>
               ))}
             </select>
           </label>
+          {isVerified && verifiedReady && (
+            <p className="settings-model-note">
+              {verifiedPick
+                ? tr(
+                    "Pro toto místo: {model} · chyba teploty na 1–2 dny {mae} °C{base} · stanice {station} ({km} km). Další dny doplňuje Automaticky.",
+                    {
+                      model: modelLabel(verifiedPick.model),
+                      mae: Number.isFinite(verifiedPick.mae)
+                        ? verifiedPick.mae.toFixed(1)
+                        : "–",
+                      base:
+                        verifiedPick.baselineMae != null &&
+                        verifiedPick.model !== DEFAULT_MODEL
+                          ? tr(" (Automaticky {b} °C)", {
+                              b: verifiedPick.baselineMae.toFixed(1),
+                            })
+                          : "",
+                      station: verifiedPick.station,
+                      km: verifiedPick.distanceKm,
+                    },
+                  )
+                : tr(
+                    "V okolí tohoto místa nemám měření ze stanic, používám Automaticky.",
+                  )}
+            </p>
+          )}
           <div className="footer-settings-right">
             <button
               type="button"

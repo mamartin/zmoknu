@@ -758,6 +758,12 @@ const EN: Record<string, string> = {
   "Pro tento den nemá model {model} předpověď – nejde dál než jeho horizont.":
     "The {model} model has no forecast for this day – it doesn't reach beyond its horizon.",
   "Přepnout na Automaticky": "Switch to Automatic",
+  "Ověřený pro místo (podle měření)": "Verified for this place (by measurements)",
+  "Pro toto místo: {model} · chyba teploty na 1–2 dny {mae} °C{base} · stanice {station} ({km} km). Další dny doplňuje Automaticky.":
+    "For this place: {model} · 1–2 day temperature error {mae} °C{base} · station {station} ({km} km). Later days come from Automatic.",
+  " (Automaticky {b} °C)": " (Automatic {b} °C)",
+  "V okolí tohoto místa nemám měření ze stanic, používám Automaticky.":
+    "No station measurements near this place, using Automatic.",
 
   // models
   "Automaticky (nejlepší shoda)": "Automatic (best match)",

@@ -8257,6 +8257,13 @@ html.radar-open body {
   font-size: 0.82rem;
   cursor: pointer;
 }
+.settings-model-note {
+  flex: 1 1 100%;
+  margin: -4px 0 0;
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
 .settings-hint {
   font-size: 0.74rem;
   color: var(--muted);

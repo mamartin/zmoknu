@@ -5,6 +5,7 @@
 interface ImportMetaEnv {
   readonly VITE_MAPTILER_KEY?: string;
   readonly VITE_OWM_KEY?: string;
+  readonly VITE_MODEL_API_URL?: string;
   readonly VITE_PUBLIC_POSTHOG_KEY: string;
   readonly VITE_PUBLIC_POSTHOG_HOST: string;
 }
