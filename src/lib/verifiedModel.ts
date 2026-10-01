@@ -1,27 +1,44 @@
-import { MODEL_API_URL, WEATHER_MODELS } from "./models";
+import {
+  DEFAULT_MODEL,
+  MODEL_API_URL,
+  MODEL_GROUPS,
+  WEATHER_MODELS,
+  type ModelGroup,
+  type ModelMix,
+} from "./models";
 
-// Výběr modelu podle ověřené přesnosti v okolí místa. Pořadí počítá
+// Výběr modelů podle ověřené přesnosti v okolí místa. Pořadí počítá
 // samostatná služba Scorecast (noční srovnání předpovědí s měřením
 // stanic); tady se jen zeptáme jejího /api/best.
 
-export interface VerifiedPick {
-  /** Vybraný model (id pro Open-Meteo). */
+export interface MixPart {
   model: string;
-  /** Průměrná chyba teploty vybraného modelu (°C). */
-  mae: number;
-  /** Totéž pro výchozí model (Automaticky), pokud je k dispozici. */
-  baselineMae?: number;
+  /** O kolik % je model přesnější než Automaticky (0 = je to Automaticky). */
+  gainPct: number;
+}
+
+export interface VerifiedPick {
+  /** Model pro každou skupinu veličin (id pro Open-Meteo). */
+  mix: ModelMix;
+  parts: Record<ModelGroup, MixPart>;
   /** Nejbližší použitá stanice a její vzdálenost. */
   station: string;
   distanceKm: number;
   /** Kolik stanic do výběru promluvilo. */
   stations: number;
-  /** S jakým předstihem (dny) je chyba měřena. */
+  /** S jakým předstihem (dny) je přesnost měřena. */
   leads: number[];
 }
 
-interface BestResponse extends Partial<Omit<VerifiedPick, "model">> {
+interface BestResponse {
   model: string | null;
+  mix?: Partial<
+    Record<ModelGroup, { model?: string; gainPct?: number | null }>
+  > | null;
+  station?: string;
+  distanceKm?: number;
+  stations?: number;
+  leads?: number[];
 }
 
 // Pořadí se přepočítává jednou za noc → v rámci běhu appky stačí cache
@@ -41,12 +58,24 @@ export function resolveVerifiedModel(
     job = fetch(url)
       .then((r) => (r.ok ? (r.json() as Promise<BestResponse>) : null))
       .then((d) => {
-        // Neznámý model (služba je novější než appka) radši nepoužijeme.
-        if (!d?.model || !KNOWN.has(d.model)) return null;
+        if (!d?.model) return null;
+        const parts = {} as Record<ModelGroup, MixPart>;
+        for (const g of MODEL_GROUPS) {
+          // Starší služba bez mixu → jeden model na všechno. Neznámý model
+          // (služba je novější než appka) radši nahradíme Automaticky.
+          const p = d.mix ? d.mix[g] : { model: d.model, gainPct: null };
+          const known = p?.model != null && KNOWN.has(p.model);
+          parts[g] = {
+            model: known ? p.model! : DEFAULT_MODEL,
+            gainPct: known ? Math.max(0, p.gainPct ?? 0) : 0,
+          };
+        }
+        const mix = Object.fromEntries(
+          MODEL_GROUPS.map((g) => [g, parts[g].model]),
+        ) as ModelMix;
         return {
-          model: d.model,
-          mae: Number(d.mae ?? NaN),
-          baselineMae: d.baselineMae ?? undefined,
+          mix,
+          parts,
           station: d.station ?? "",
           distanceKm: d.distanceKm ?? 0,
           stations: d.stations ?? 0,

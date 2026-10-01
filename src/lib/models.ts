@@ -51,6 +51,17 @@ export const VERIFIED_CHOICE: WeatherModel = {
   flag: "🎯",
 };
 
+// „Ověřený" skládá předpověď z více modelů: každá skupina veličin může pocházet
+// z jiného (podle toho, který se v okolí místa nejvíc trefoval). Skupina se
+// nedělí, ať k sobě sedí třeba srážky a ikona počasí.
+export type ModelGroup = "temperature" | "wind" | "precipitation";
+export type ModelMix = Record<ModelGroup, string>;
+export const MODEL_GROUPS: ModelGroup[] = ["temperature", "wind", "precipitation"];
+
+export function mixKey(mix: ModelMix): string {
+  return MODEL_GROUPS.map((g) => mix[g]).join("+");
+}
+
 // Pořadí v nabídce: Automaticky, Ověřený, pak jednotlivé modely.
 export const MODEL_CHOICES: WeatherModel[] = [
   WEATHER_MODELS[0],

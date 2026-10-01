@@ -53,9 +53,12 @@ vercel
 
 ## Ověřený model pro místo
 
-Volba **„Ověřený pro místo (podle měření)"** v nastavení vybere pro hledané místo
-model, který se v okolí za posledních 30 dní nejvíc trefoval v předpovědi
-na 1–2 dny. Dny za horizontem vybraného modelu doplní Automaticky.
+Volba **„Ověřený pro místo (podle měření)"** v nastavení složí předpověď pro
+hledané místo z modelů, které se v okolí za posledních 30 dní nejvíc trefovaly
+v předpovědi na 1–2 dny, a to zvlášť pro teplotu (s pocitovou teplotou
+a vlhkostí), vítr a srážky (s oblačností a ikonou počasí). Automaticky nahradí
+jen model s jasným náskokem. Co modely nemají (dny za jejich horizontem),
+doplní Automaticky.
 
 Pořadí modelů počítá samostatná služba
 [Scorecast](https://github.com/mamartin/scorecast) (noční srovnání předpovědí

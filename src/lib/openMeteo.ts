@@ -1,5 +1,6 @@
 import type { Forecast, GeoLocation } from "../types";
 import { getLang } from "./i18n";
+import { mixKey, type ModelGroup, type ModelMix } from "./models";
 
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search";
@@ -182,6 +183,50 @@ function fillRawForecast(
   return { hourly, daily };
 }
 
+// Do které skupiny veličina Open-Meteo patří (viz ModelMix). Zbytek – srážky,
+// oblačnost, kód počasí, tlak, UV – jde se srážkami, ať k sobě sedí.
+function groupOf(key: string): ModelGroup {
+  if (/^(temperature|apparent_temperature|relative_humidity|dew_point)/.test(key)) {
+    return "temperature";
+  }
+  if (key.startsWith("wind_")) return "wind";
+  return "precipitation";
+}
+
+// Přepíše v `target` veličiny dané skupiny hodnotami ze `src` (párování podle
+// času). Kde `src` hodnotu nemá, zůstane null – doplní ji fillRawForecast.
+function overlaySection(
+  target: RawSection | undefined,
+  src: RawSection | undefined,
+  group: ModelGroup,
+): void {
+  if (!target || !src) return;
+  const tTimes = (target.time ?? []) as string[];
+  const sIndex = new Map(((src.time ?? []) as string[]).map((t, i) => [t, i]));
+  for (const [key, sArr] of Object.entries(src)) {
+    if (key === "time" || !sArr || groupOf(key) !== group) continue;
+    target[key] = tTimes.map((t) => {
+      const j = sIndex.get(t);
+      return j == null ? null : sArr[j] ?? null;
+    });
+  }
+}
+
+function overlayRawForecast(
+  target: RawForecast,
+  src: RawForecast,
+  group: ModelGroup,
+): void {
+  overlaySection(target.hourly as RawSection, src.hourly as RawSection, group);
+  overlaySection(target.daily as RawSection, src.daily as RawSection, group);
+  const cur = target.current as Record<string, number | string | null>;
+  for (const [k, v] of Object.entries(src.current ?? {})) {
+    if (k !== "time" && k !== "interval" && groupOf(k) === group) {
+      cur[k] = v ?? null;
+    }
+  }
+}
+
 export function saveOfflineForecast(
   location: GeoLocation,
   pastDays: number,
@@ -227,25 +272,22 @@ export async function fetchForecast(
   lat: number,
   lon: number,
   pastDays = 1,
-  model = "best_match",
-  opts?: {
-    force?: boolean;
-    // Čím doplnit hodiny/dny, pro které zvolený model data nemá (krátký
-    // horizont regionálních modelů). Bez něj zůstávají prázdné jako dřív.
-    fillFrom?: string;
-  },
+  // Jeden model, nebo mix po skupinách veličin („Ověřený pro místo"): srážky
+  // a obloha z mix.precipitation, teplota a vítr přes ně z mix.temperature
+  // a mix.wind. Co modely mixu nemají (krátký horizont regionálních), doplní
+  // best_match.
+  model: string | ModelMix = "best_match",
+  opts?: { force?: boolean },
 ): Promise<Forecast> {
-  const useModel = model && model !== "best_match";
+  const mix = typeof model === "string" ? null : model;
+  const base = (mix ? mix.precipitation : (model as string)) || "best_match";
+  const useModel = base !== "best_match";
+  const overlays = mix
+    ? (["temperature", "wind"] as const).filter((g) => mix[g] !== base)
+    : [];
   const fillFrom =
-    useModel && opts?.fillFrom && opts.fillFrom !== model
-      ? opts.fillFrom
-      : undefined;
-  const cacheKey = fcKey(
-    lat,
-    lon,
-    pastDays,
-    fillFrom ? `${model}+${fillFrom}` : model,
-  );
+    mix && (useModel || overlays.length) ? "best_match" : undefined;
+  const cacheKey = fcKey(lat, lon, pastDays, mix ? mixKey(mix) : base);
   if (!opts?.force) {
     const c = forecastCache.get(cacheKey);
     if (c && Date.now() - c.at < FORECAST_TTL) return c.data;
@@ -308,27 +350,39 @@ export async function fetchForecast(
     wind_speed_unit: "ms",
   });
 
-  // Doplňkový model dostane stejné parametry (stejná časová osa).
-  const fillParams = new URLSearchParams(params);
-  if (fillFrom && fillFrom !== "best_match") fillParams.set("models", fillFrom);
-
-  // Zvolený konkrétní model se pošle jako models=… (jeden model → proměnné
-  // zůstávají bez přípony, takže mapování níže funguje beze změny).
-  if (useModel) params.set("models", model);
-
-  const [data, fill] = await Promise.all([
-    fetchOmJson<RawForecast>(
-      `${FORECAST_URL}?${params.toString()}`,
-      "Nepodařilo se načíst předpověď.",
+  // Každý model zvlášť se stejnými parametry (stejná časová osa). Konkrétní
+  // model se pošle jako models=… (jeden model → proměnné zůstávají bez
+  // přípony, takže mapování níže funguje beze změny).
+  const urlFor = (m: string) => {
+    const p = new URLSearchParams(params);
+    if (m !== "best_match") p.set("models", m);
+    return `${FORECAST_URL}?${p.toString()}`;
+  };
+  const extra = [
+    ...new Set([
+      ...overlays.map((g) => mix![g]),
+      ...(fillFrom ? [fillFrom] : []),
+    ]),
+  ].filter((m) => m !== base);
+  const [data, ...extraData] = await Promise.all([
+    fetchOmJson<RawForecast>(urlFor(base), "Nepodařilo se načíst předpověď."),
+    // Doplňkové modely jsou nepovinné – při chybě zůstane základní model.
+    ...extra.map((m) =>
+      fetchOmJson<RawForecast>(urlFor(m), "extra").catch(() => null),
     ),
-    fillFrom
-      ? fetchOmJson<RawForecast>(
-          `${FORECAST_URL}?${fillParams.toString()}`,
-          "fill",
-        ).catch(() => null)
-      : Promise.resolve(null),
   ]);
-  // Co zvolený model nemá, doplníme z fillFrom (časy, kde se doplňovaly
+  const byModel = new Map(extra.map((m, i) => [m, extraData[i]]));
+  // Je-li základem best_match, poslouží i jako doplnění (kopie před přepisem).
+  const fill = !fillFrom
+    ? null
+    : fillFrom === base
+      ? (structuredClone(data) as RawForecast)
+      : byModel.get(fillFrom) ?? null;
+  for (const g of overlays) {
+    const src = byModel.get(mix![g]);
+    if (src) overlayRawForecast(data, src, g);
+  }
+  // Co zvolené modely nemají, doplníme z fillFrom (časy, kde se doplňovaly
   // srážky, si pamatujeme kvůli přepisu úhrnů níže).
   const filled = fill ? fillRawForecast(data, fill) : null;
 
