@@ -1,8 +1,8 @@
 import { MODEL_API_URL, WEATHER_MODELS } from "./models";
 
 // Výběr modelu podle ověřené přesnosti v okolí místa. Pořadí počítá
-// samostatná služba „Přesnost předpovědí" (noční srovnání předpovědí
-// s měřením stanic); tady se jen zeptáme jejího /api/best.
+// samostatná služba Scorecast (noční srovnání předpovědí s měřením
+// stanic); tady se jen zeptáme jejího /api/best.
 
 export interface VerifiedPick {
   /** Vybraný model (id pro Open-Meteo). */

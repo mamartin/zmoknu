@@ -57,10 +57,10 @@ Volba **„Ověřený pro místo (podle měření)"** v nastavení vybere pro hl
 model, který se v okolí za posledních 30 dní nejvíc trefoval v předpovědi
 na 1–2 dny. Dny za horizontem vybraného modelu doplní Automaticky.
 
-Pořadí modelů počítá samostatná služba *Přesnost předpovědí* (noční srovnání
-předpovědí s měřením stanic). Aplikace volá její `/api/best?lat=…&lon=…`;
-adresu služby nastavte v `VITE_MODEL_API_URL`. Bez ní se volba v nastavení
-nezobrazí.
+Pořadí modelů počítá samostatná služba
+[Scorecast](https://github.com/mamartin/scorecast) (noční srovnání předpovědí
+s měřením stanic). Aplikace volá její `/api/best?lat=…&lon=…`; adresu služby
+nastavte v `VITE_MODEL_API_URL`. Bez ní se volba v nastavení nezobrazí.
 
 ## Licence
 
