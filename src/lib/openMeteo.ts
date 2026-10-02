@@ -1,6 +1,6 @@
 import type { Forecast, GeoLocation } from "../types";
 import { getLang } from "./i18n";
-import { mixKey, type ModelGroup, type ModelMix } from "./models";
+import { MIX_DAYS, MODEL_GROUPS, mixKey, type ModelGroup, type ModelMix } from "./models";
 
 const FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search";
@@ -129,56 +129,57 @@ function persistOfflineStore(store: OfflineStore, favKeys: Set<string>): void {
 // aby se při ořezu zachovaly předpovědi oblíbených míst.
 type RawSection = Record<string, (number | string | null)[] | undefined>;
 
-// Doplní do `target` hodnoty ze `src` všude, kde target nemá data (null).
-// Párujeme podle času, ne indexu. Vrací časy, kde chyběl `watchKey`.
-function fillSection(
+// Hluboká kopie (structuredClone chybí ve starších prohlížečích, např. iOS < 15.4).
+const clone = <T,>(x: T): T =>
+  typeof structuredClone === "function" ? structuredClone(x) : JSON.parse(JSON.stringify(x));
+
+// Převezme do `target` hodnoty ze `src` (párování podle času, ne indexu) tam,
+// kde `take(klíč, čas, současná hodnota)` vrátí true – i prázdnou (null).
+// Vrací časy, kdy se převzala nenulová hodnota `watchKey`.
+function mergeSection(
   target: RawSection | undefined,
   src: RawSection | undefined,
-  watchKey: string,
+  take: (key: string, time: string, current: unknown) => boolean,
+  watchKey = "",
 ): Set<string> {
-  const filled = new Set<string>();
-  if (!target || !src) return filled;
+  const taken = new Set<string>();
+  if (!target || !src) return taken;
   const tTimes = (target.time ?? []) as string[];
   const sIndex = new Map(((src.time ?? []) as string[]).map((t, i) => [t, i]));
   for (const [key, sArr] of Object.entries(src)) {
     if (key === "time" || !sArr) continue;
     const tArr = target[key] ?? [];
     target[key] = tTimes.map((t, i) => {
-      const v = tArr[i];
-      if (v != null) return v;
+      const cur = tArr[i] ?? null;
+      if (!take(key, t, cur)) return cur;
       const j = sIndex.get(t);
-      const sv = j == null ? null : sArr[j];
-      if (sv != null && key === watchKey) filled.add(t);
-      return sv ?? null;
+      const sv = j == null ? null : sArr[j] ?? null;
+      if (sv != null && key === watchKey) taken.add(t);
+      return sv;
     });
   }
-  return filled;
+  return taken;
 }
 
-// Doplní chybějící data zvoleného modelu z jiného (typicky best_match), aby
-// krátkodobý regionální model nekončil po 2–3 dnech prázdnou předpovědí.
-function fillRawForecast(
-  data: RawForecast,
-  fill: RawForecast,
-): { hourly: Set<string>; daily: Set<string> } {
-  const hourly = fillSection(
-    data.hourly as RawSection,
-    fill.hourly as RawSection,
-    "precipitation",
-  );
-  const daily = fillSection(
-    data.daily as RawSection,
-    fill.daily as RawSection,
-    "precipitation_sum",
-  );
-  fillSection(
-    data.minutely_15 as RawSection | undefined,
-    fill.minutely_15 as RawSection | undefined,
-    "",
-  );
-  const cur = data.current as Record<string, number | string | null>;
-  for (const [k, v] of Object.entries(fill.current ?? {})) {
-    if (cur && cur[k] == null && v != null) cur[k] = v;
+// Totéž pro celou odpověď Open-Meteo. Vrací časy (hodiny, dny), kdy se
+// převzaly srážky – kvůli přepisu úhrnů níže.
+interface Taken {
+  hourly: Set<string>;
+  daily: Set<string>;
+}
+function mergeRaw(
+  target: RawForecast,
+  src: RawForecast,
+  take: (key: string, time: string, current: unknown) => boolean,
+): Taken {
+  const hourly = mergeSection(target.hourly as RawSection, src.hourly as RawSection, take, "precipitation");
+  const daily = mergeSection(target.daily as RawSection, src.daily as RawSection, take, "precipitation_sum");
+  mergeSection(target.minutely_15 as RawSection | undefined, src.minutely_15 as RawSection | undefined, take);
+  // `current` je jeden okamžik bez pole časů.
+  const cur = target.current as Record<string, number | string | null>;
+  const now = String(cur?.time ?? "");
+  for (const [k, v] of Object.entries(src.current ?? {})) {
+    if (k !== "time" && k !== "interval" && take(k, now, cur[k] ?? null)) cur[k] = v ?? null;
   }
   return { hourly, daily };
 }
@@ -193,37 +194,35 @@ function groupOf(key: string): ModelGroup {
   return "precipitation";
 }
 
-// Přepíše v `target` veličiny dané skupiny hodnotami ze `src` (párování podle
-// času). Kde `src` hodnotu nemá, zůstane null – doplní ji fillRawForecast.
-function overlaySection(
-  target: RawSection | undefined,
-  src: RawSection | undefined,
-  group: ModelGroup,
-): void {
-  if (!target || !src) return;
-  const tTimes = (target.time ?? []) as string[];
-  const sIndex = new Map(((src.time ?? []) as string[]).map((t, i) => [t, i]));
-  for (const [key, sArr] of Object.entries(src)) {
-    if (key === "time" || !sArr || groupOf(key) !== group) continue;
-    target[key] = tTimes.map((t) => {
-      const j = sIndex.get(t);
-      return j == null ? null : sArr[j] ?? null;
+// Denní maxima a minima podle výsledné hodinové řady. U mixu pochází den na
+// rozhraní z více modelů a Open-Meteo pro neúplně pokrytý den vrací prázdné
+// denní hodnoty – bez přepočtu by nesedělo denní maximum s hodinovým průběhem.
+const DAILY_FROM_HOURLY: [string, string, (xs: number[]) => number][] = [
+  ["temperature_2m_max", "temperature_2m", (xs) => Math.max(...xs)],
+  ["temperature_2m_min", "temperature_2m", (xs) => Math.min(...xs)],
+  ["wind_speed_10m_max", "wind_speed_10m", (xs) => Math.max(...xs)],
+  ["wind_gusts_10m_max", "wind_gusts_10m", (xs) => Math.max(...xs)],
+];
+function recomputeDailyExtremes(data: RawForecast): void {
+  const hTimes = (data.hourly?.time ?? []) as string[];
+  const days = (data.daily?.time ?? []) as string[];
+  for (const [dKey, hKey, agg] of DAILY_FROM_HOURLY) {
+    const hArr = (data.hourly as RawSection)[hKey];
+    const dArr = (data.daily as RawSection)[dKey];
+    if (!hArr || !dArr) continue;
+    const byDay = new Map<string, number[]>();
+    hTimes.forEach((t, i) => {
+      const v = hArr[i];
+      if (v == null) return;
+      const d = t.slice(0, 10);
+      if (!byDay.has(d)) byDay.set(d, []);
+      byDay.get(d)!.push(Number(v));
     });
-  }
-}
-
-function overlayRawForecast(
-  target: RawForecast,
-  src: RawForecast,
-  group: ModelGroup,
-): void {
-  overlaySection(target.hourly as RawSection, src.hourly as RawSection, group);
-  overlaySection(target.daily as RawSection, src.daily as RawSection, group);
-  const cur = target.current as Record<string, number | string | null>;
-  for (const [k, v] of Object.entries(src.current ?? {})) {
-    if (k !== "time" && k !== "interval" && groupOf(k) === group) {
-      cur[k] = v ?? null;
-    }
+    days.forEach((d, i) => {
+      const xs = byDay.get(d);
+      // Den s většinou hodin; jinak necháme hodnotu z Open-Meteo.
+      if (xs && xs.length >= 20) dArr[i] = Math.round(agg(xs) * 10) / 10;
+    });
   }
 }
 
@@ -279,8 +278,11 @@ export async function fetchForecast(
   model: string | ModelMix = "best_match",
   opts?: { force?: boolean },
 ): Promise<Forecast> {
-  const mix = typeof model === "string" ? null : model;
-  const base = (mix ? mix.precipitation : (model as string)) || "best_match";
+  let mix = typeof model === "string" ? null : model;
+  // Mix samých Automaticky je obyčejné Automaticky (stejná data i cache).
+  if (mix && MODEL_GROUPS.every((g) => mix![g] === "best_match")) mix = null;
+  const base =
+    (mix ? mix.precipitation : typeof model === "string" ? model : "") || "best_match";
   const useModel = base !== "best_match";
   const overlays = mix
     ? (["temperature", "wind"] as const).filter((g) => mix[g] !== base)
@@ -376,15 +378,36 @@ export async function fetchForecast(
   const fill = !fillFrom
     ? null
     : fillFrom === base
-      ? (structuredClone(data) as RawForecast)
+      ? clone(data)
       : byModel.get(fillFrom) ?? null;
+  // Které modely skupiny opravdu dodaly (doplňkový nemusel jít načíst).
+  const sources: Partial<Record<ModelGroup, string>> = {};
+  if (mix) for (const g of MODEL_GROUPS) sources[g] = base;
   for (const g of overlays) {
     const src = byModel.get(mix![g]);
-    if (src) overlayRawForecast(data, src, g);
+    if (!src) continue;
+    mergeRaw(data, src, (k) => groupOf(k) === g);
+    sources[g] = mix![g];
   }
   // Co zvolené modely nemají, doplníme z fillFrom (časy, kde se doplňovaly
   // srážky, si pamatujeme kvůli přepisu úhrnů níže).
-  const filled = fill ? fillRawForecast(data, fill) : null;
+  let filled: Taken | null = null;
+  if (fill) {
+    filled = mergeRaw(data, fill, (_k, _t, cur) => cur == null);
+    // Mix platí jen na prvních MIX_DAYS dní – tak daleko ho Scorecast ověřuje
+    // (předpověď na 1–2 dny); další dny jsou celé z Automaticky.
+    const today = Math.min(92, Math.max(1, pastDays));
+    const cutoff = (data.daily?.time as string[] | undefined)?.[today + MIX_DAYS];
+    if (mix && cutoff) {
+      const later = mergeRaw(data, fill, (_k, t) => t >= cutoff);
+      later.hourly.forEach((t) => filled!.hourly.add(t));
+      later.daily.forEach((t) => filled!.daily.add(t));
+    }
+    recomputeDailyExtremes(data);
+  }
+  // Nepovedený mix (doplňkový model chybí) neukládáme do cache – příště znovu.
+  const degraded =
+    !!mix && (MODEL_GROUPS.some((g) => sources[g] !== mix![g]) || (!!fillFrom && !fill));
 
   const c = data.current;
   const hourly = mapHourly(data.hourly);
@@ -454,6 +477,7 @@ export async function fetchForecast(
     utcOffsetSeconds: Number(data.utc_offset_seconds) || 0,
     elevation: Number.isFinite(elev) ? elev : undefined,
     minutely15,
+    ...(mix ? { sources } : {}),
     current: {
       time: String(c.time),
       temperature: Number(c.temperature_2m),
@@ -471,7 +495,7 @@ export async function fetchForecast(
     hourly,
     daily,
   };
-  forecastCache.set(cacheKey, { at: Date.now(), data: result });
+  if (!degraded) forecastCache.set(cacheKey, { at: Date.now(), data: result });
   return result;
 }
 

@@ -57,8 +57,10 @@ Volba **„Ověřený pro místo (podle měření)"** v nastavení složí před
 hledané místo z modelů, které se v okolí za posledních 30 dní nejvíc trefovaly
 v předpovědi na 1–2 dny, a to zvlášť pro teplotu (s pocitovou teplotou
 a vlhkostí), vítr a srážky (s oblačností a ikonou počasí). Automaticky nahradí
-jen model s jasným náskokem. Co modely nemají (dny za jejich horizontem),
-doplní Automaticky.
+jen model s jasným náskokem. Mix platí pro dnešek až pozítří (tak daleko je
+ověřený), další dny i hodiny, které modely nemají, jsou z Automaticky. Když
+služba nebo některý model neodpovídá, použije se Automaticky a poznámka
+v nastavení to řekne.
 
 Pořadí modelů počítá samostatná služba
 [Scorecast](https://github.com/mamartin/scorecast) (noční srovnání předpovědí

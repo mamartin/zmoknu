@@ -77,6 +77,9 @@ export interface Forecast {
   hourly: HourlyPoint[];
   daily: DailyPoint[];
   minutely15?: Minutely15;
+  // U „Ověřeného pro místo": který model skutečně dodal teplotu, vítr
+  // a srážky (doplňkový model nemusel jít načíst).
+  sources?: Partial<Record<"temperature" | "wind" | "precipitation", string>>;
 }
 
 export interface RadarFrame {

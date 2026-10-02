@@ -1,8 +1,11 @@
+import { useEffect, useState } from "react";
 import {
   DEFAULT_MODEL,
   MODEL_API_URL,
   MODEL_GROUPS,
+  VERIFIED_MODEL,
   WEATHER_MODELS,
+  mixKey,
   type ModelGroup,
   type ModelMix,
 } from "./models";
@@ -41,11 +44,49 @@ interface BestResponse {
   leads?: number[];
 }
 
+// Na odpověď Scorecastu čekáme nejvýš tak dlouho – předpověď na ni čeká.
+const TIMEOUT_MS = 3000;
+
+function timeoutSignal(ms: number): AbortSignal | undefined {
+  if (typeof AbortSignal !== "undefined" && "timeout" in AbortSignal) {
+    return AbortSignal.timeout(ms);
+  }
+  if (typeof AbortController === "undefined") return undefined;
+  const c = new AbortController();
+  setTimeout(() => c.abort(), ms);
+  return c.signal;
+}
+
 // Pořadí se přepočítává jednou za noc → v rámci běhu appky stačí cache
-// podle místa (zaokrouhleno na ~1 km).
+// podle místa (zaokrouhleno na ~1 km). Chyby se necachují.
 const cache = new Map<string, Promise<VerifiedPick | null>>();
 const KNOWN = new Set(WEATHER_MODELS.map((m) => m.id));
 
+function parsePick(d: BestResponse): VerifiedPick | null {
+  if (!d.model) return null; // v okolí nejsou stanice
+  const parts = {} as Record<ModelGroup, MixPart>;
+  for (const g of MODEL_GROUPS) {
+    // Starší služba bez mixu → jeden model na všechno. Neznámý model
+    // (služba je novější než appka) radši nahradíme Automaticky.
+    const p = d.mix ? d.mix[g] : { model: d.model, gainPct: null };
+    const known = p?.model != null && KNOWN.has(p.model);
+    parts[g] = {
+      model: known ? p.model! : DEFAULT_MODEL,
+      gainPct: known ? Math.max(0, p.gainPct ?? 0) : 0,
+    };
+  }
+  return {
+    mix: Object.fromEntries(MODEL_GROUPS.map((g) => [g, parts[g].model])) as ModelMix,
+    parts,
+    station: d.station ?? "",
+    distanceKm: d.distanceKm ?? 0,
+    stations: d.stations ?? 0,
+    leads: d.leads ?? [1, 2],
+  };
+}
+
+// Výběr pro místo: null = v okolí nejsou stanice; při chybě (síť, časový
+// limit, chyba služby) promise selže a příští volání to zkusí znovu.
 export function resolveVerifiedModel(
   lat: number,
   lon: number,
@@ -55,39 +96,71 @@ export function resolveVerifiedModel(
   let job = cache.get(key);
   if (!job) {
     const url = `${MODEL_API_URL}/api/best?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`;
-    job = fetch(url)
-      .then((r) => (r.ok ? (r.json() as Promise<BestResponse>) : null))
-      .then((d) => {
-        if (!d?.model) return null;
-        const parts = {} as Record<ModelGroup, MixPart>;
-        for (const g of MODEL_GROUPS) {
-          // Starší služba bez mixu → jeden model na všechno. Neznámý model
-          // (služba je novější než appka) radši nahradíme Automaticky.
-          const p = d.mix ? d.mix[g] : { model: d.model, gainPct: null };
-          const known = p?.model != null && KNOWN.has(p.model);
-          parts[g] = {
-            model: known ? p.model! : DEFAULT_MODEL,
-            gainPct: known ? Math.max(0, p.gainPct ?? 0) : 0,
-          };
-        }
-        const mix = Object.fromEntries(
-          MODEL_GROUPS.map((g) => [g, parts[g].model]),
-        ) as ModelMix;
-        return {
-          mix,
-          parts,
-          station: d.station ?? "",
-          distanceKm: d.distanceKm ?? 0,
-          stations: d.stations ?? 0,
-          leads: d.leads ?? [1, 2],
-        };
+    job = fetch(url, { signal: timeoutSignal(TIMEOUT_MS) })
+      .then((r) => {
+        if (!r.ok) throw new Error(`Scorecast ${r.status}`);
+        return r.json() as Promise<BestResponse>;
       })
-      .catch(() => {
-        // Síťová chyba – příště to zkusíme znovu.
+      .then(parsePick)
+      .catch((e) => {
         cache.delete(key);
-        return null;
+        throw e;
       });
     cache.set(key, job);
   }
   return job;
+}
+
+// Z čeho stahovat předpověď: mix modelů, bez výběru Automaticky.
+export const sourceFor = (pick: VerifiedPick | null): string | ModelMix =>
+  pick?.mix ?? DEFAULT_MODEL;
+
+export const sourceKeyOf = (src: string | ModelMix): string =>
+  typeof src === "string" ? src : mixKey(src);
+
+// Zdroj předpovědi pro zvolený model. U „Ověřeného pro místo" se zeptá
+// Scorecastu; předpověď má počkat, dokud není `ready`. Při chybě je
+// `failed` a použije se Automaticky; obnovení (reloadTick) to zkusí znovu.
+export function useVerifiedSource(
+  lat: number,
+  lon: number,
+  modelChoice: string,
+  reloadTick: number,
+) {
+  const isVerified = modelChoice === VERIFIED_MODEL;
+  const key = `${lat},${lon}`;
+  const [state, setState] = useState<{
+    key: string;
+    pick: VerifiedPick | null;
+    failed: boolean;
+  } | null>(null);
+  useEffect(() => {
+    if (!isVerified) return;
+    let cancelled = false;
+    const [la, lo] = key.split(",").map(Number);
+    resolveVerifiedModel(la, lo).then(
+      (pick) => {
+        if (!cancelled) setState({ key, pick, failed: false });
+      },
+      () => {
+        if (!cancelled) setState({ key, pick: null, failed: true });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [isVerified, key, reloadTick]);
+  const ready = !isVerified || state?.key === key;
+  const pick = isVerified && ready ? state?.pick ?? null : null;
+  const source = isVerified ? sourceFor(pick) : modelChoice;
+  return {
+    isVerified,
+    ready,
+    pick,
+    failed: isVerified && ready && !!state?.failed,
+    source,
+    sourceKey: sourceKeyOf(source),
+    // Model pro popisky (legenda meteogramu, hlášky).
+    model: typeof source === "string" ? source : VERIFIED_MODEL,
+  };
 }

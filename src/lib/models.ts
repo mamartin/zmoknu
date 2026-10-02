@@ -62,6 +62,10 @@ export function mixKey(mix: ModelMix): string {
   return MODEL_GROUPS.map((g) => mix[g]).join("+");
 }
 
+// Na kolik dní (dnes, zítra, pozítří) mix platí – Scorecast ho ověřuje na
+// předpovědi na 1–2 dny; další dny jsou z Automaticky.
+export const MIX_DAYS = 3;
+
 // Pořadí v nabídce: Automaticky, Ověřený, pak jednotlivé modely.
 export const MODEL_CHOICES: WeatherModel[] = [
   WEATHER_MODELS[0],

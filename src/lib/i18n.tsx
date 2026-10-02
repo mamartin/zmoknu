@@ -759,8 +759,11 @@ const EN: Record<string, string> = {
     "The {model} model has no forecast for this day – it doesn't reach beyond its horizon.",
   "Přepnout na Automaticky": "Switch to Automatic",
   "Ověřený pro místo (podle měření)": "Verified for this place (by measurements)",
-  "Pro toto místo: {mix}. Podle měření stanice {station} ({km} km) v předpovědi na 1–2 dny; další dny doplňuje Automaticky.":
-    "For this place: {mix}. Based on measurements at {station} ({km} km) for 1–2 day forecasts; later days come from Automatic.",
+  "Pro toto místo: {mix}. Podle měření stanice {station} ({km} km); platí pro dnešek až pozítří, další dny jsou z Automaticky.":
+    "For this place: {mix}. Based on measurements at {station} ({km} km); applies to today through the day after tomorrow, later days come from Automatic.",
+  " (místo {model}, který teď nejde načíst)": " (instead of {model}, which can't be loaded right now)",
+  "Výběr ověřených modelů se teď nepodařilo načíst, používám Automaticky.":
+    "Couldn't load the verified models right now, using Automatic.",
   vítr: "wind",
   srážky: "precipitation",
   Automaticky: "Automatic",

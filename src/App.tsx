@@ -40,12 +40,16 @@ import {
   MODEL_GROUPS,
   VERIFIED_AVAILABLE,
   VERIFIED_MODEL,
-  mixKey,
   modelLabel,
   type ModelGroup,
   type ModelMix,
 } from "./lib/models";
-import { resolveVerifiedModel, type VerifiedPick } from "./lib/verifiedModel";
+import {
+  resolveVerifiedModel,
+  sourceFor,
+  sourceKeyOf,
+  useVerifiedSource,
+} from "./lib/verifiedModel";
 import {
   fetchForecast,
   getOfflineForecast,
@@ -242,36 +246,6 @@ export default function App() {
     storedChoice === VERIFIED_MODEL && !VERIFIED_AVAILABLE
       ? DEFAULT_MODEL
       : storedChoice;
-  const isVerified = modelChoice === VERIFIED_MODEL;
-  const verifiedKey = `${location.latitude},${location.longitude}`;
-  const [verified, setVerified] = useState<{
-    key: string;
-    pick: VerifiedPick | null;
-  } | null>(null);
-  useEffect(() => {
-    if (!isVerified) return;
-    let cancelled = false;
-    const [lat, lon] = verifiedKey.split(",").map(Number);
-    resolveVerifiedModel(lat, lon)
-      .catch(() => null)
-      .then((pick) => {
-        if (!cancelled) setVerified({ key: verifiedKey, pick });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [isVerified, verifiedKey]);
-  // U „Ověřeného" počkáme na výběr modelu, ať se zbytečně nestáhne Automaticky.
-  const verifiedReady = !isVerified || verified?.key === verifiedKey;
-  const verifiedPick = isVerified && verifiedReady ? verified?.pick ?? null : null;
-  // Z čeho předpověď stahujeme: konkrétní model, nebo u „Ověřeného" mix modelů
-  // po veličinách (bez stanic v okolí Automaticky).
-  const source: string | ModelMix = isVerified
-    ? verifiedPick?.mix ?? DEFAULT_MODEL
-    : modelChoice;
-  const sourceKey = typeof source === "string" ? source : mixKey(source);
-  // Model pro popisky (legenda meteogramu, hlášky).
-  const model = typeof source === "string" ? source : VERIFIED_MODEL;
   const [pendingDate, setPendingDate] = useState<string | null>(null);
   // Vizuální stav swipe gesta (šipka vylézající z kraje jako „zpět" v Chrome).
   const [swipe, setSwipe] = useState<{
@@ -287,6 +261,17 @@ export default function App() {
   const [pull, setPull] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [reloadTick, setReloadTick] = useState(0);
+  // Z čeho předpověď stahujeme: konkrétní model, nebo u „Ověřeného" mix modelů
+  // po veličinách ze Scorecastu (bez stanic v okolí nebo při chybě Automaticky).
+  const {
+    isVerified,
+    ready: verifiedReady,
+    pick: verifiedPick,
+    failed: verifiedFailed,
+    source,
+    sourceKey,
+    model,
+  } = useVerifiedSource(location.latitude, location.longitude, modelChoice, reloadTick);
   // Kdy byla naposledy načtena předpověď + „tik" pro průběžný relativní čas.
   const [fetchedAt, setFetchedAt] = useState<number | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -646,20 +631,12 @@ export default function App() {
       .forEach((f) => {
         // U „Ověřeného" má každé oblíbené místo svůj vlastní mix modelů.
         const pickSource: Promise<string | ModelMix> = isVerified
-          ? resolveVerifiedModel(f.latitude, f.longitude)
-              .catch(() => null)
-              .then((p) => p?.mix ?? DEFAULT_MODEL)
+          ? resolveVerifiedModel(f.latitude, f.longitude).then(sourceFor, () => DEFAULT_MODEL)
           : Promise.resolve(modelChoice);
         pickSource
           .then((src) =>
             fetchForecast(f.latitude, f.longitude, pastDays, src).then((fc) =>
-              saveOfflineForecast(
-                f,
-                pastDays,
-                typeof src === "string" ? src : mixKey(src),
-                fc,
-                favoritesRef.current,
-              ),
+              saveOfflineForecast(f, pastDays, sourceKeyOf(src), fc, favoritesRef.current),
             ),
           )
           .catch(() => {});
@@ -1902,30 +1879,36 @@ export default function App() {
           </label>
           {isVerified && verifiedReady && (
             <p className="settings-model-note">
-              {verifiedPick
+              {verifiedFailed
                 ? tr(
-                    "Pro toto místo: {mix}. Podle měření stanice {station} ({km} km) v předpovědi na 1–2 dny; další dny doplňuje Automaticky.",
-                    {
-                      mix: MODEL_GROUPS.map((g) => {
-                        const p = verifiedPick.parts[g];
-                        const label =
-                          p.model === DEFAULT_MODEL
-                            ? tr("Automaticky")
-                            : modelLabel(p.model);
-                        return (
-                          `${tr(MIX_GROUP_LABEL[g])} ${label}` +
-                          (p.gainPct > 0
-                            ? tr(" (o {gain} % přesnější)", { gain: p.gainPct })
-                            : "")
-                        );
-                      }).join(" · "),
-                      station: verifiedPick.station,
-                      km: verifiedPick.distanceKm,
-                    },
+                    "Výběr ověřených modelů se teď nepodařilo načíst, používám Automaticky.",
                   )
-                : tr(
-                    "V okolí tohoto místa nemám měření ze stanic, používám Automaticky.",
-                  )}
+                : verifiedPick
+                  ? tr(
+                      "Pro toto místo: {mix}. Podle měření stanice {station} ({km} km); platí pro dnešek až pozítří, další dny jsou z Automaticky.",
+                      {
+                        mix: MODEL_GROUPS.map((g) => {
+                          const p = verifiedPick.parts[g];
+                          // Doplňkový model nemusel jít načíst – ukážeme, co předpověď opravdu použila.
+                          const used = forecast?.sources?.[g] ?? p.model;
+                          const label = (id: string) =>
+                            id === DEFAULT_MODEL ? tr("Automaticky") : modelLabel(id);
+                          return (
+                            `${tr(MIX_GROUP_LABEL[g])} ${label(used)}` +
+                            (used !== p.model
+                              ? tr(" (místo {model}, který teď nejde načíst)", { model: label(p.model) })
+                              : p.gainPct > 0
+                                ? tr(" (o {gain} % přesnější)", { gain: p.gainPct })
+                                : "")
+                          );
+                        }).join(" · "),
+                        station: verifiedPick.station,
+                        km: verifiedPick.distanceKm,
+                      },
+                    )
+                  : tr(
+                      "V okolí tohoto místa nemám měření ze stanic, používám Automaticky.",
+                    )}
             </p>
           )}
           <div className="footer-settings-right">
